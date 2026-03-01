@@ -1,9 +1,9 @@
 <?php
 /**
  * Plugin Name: WC Stock Update Form
- * Description: فرم افزایش/کاهش موجودی (ساده + ورییشن) با لاگ گروهی (batch)، گزارش ادمین/فرانت، گروه‌بندی pa_multi، قفل انتخاب نوع عملیات، نمایش موجودی و ID در سرچ، و ثبت همیشگی در Google Sheets (با کد ثبت ترتیبی). + حالت «فقط چاپ لیبل» + «خروج به انبار تهرانپارس» + «ورود مستقیم به انبار تهرانپارس»
+ * Description: فرم مدیریت ورود/خروج انبار تولید + چاپ لیبل (ساده + ورییشن) با لاگ گروهی (batch)، گزارش ادمین/فرانت، گروه‌بندی pa_multi، نمایش موجودی و ID در سرچ، ثبت در جدول اختصاصی انبار تولید، و همگام‌سازی خروجی با ووکامرس یا YITH تهرانپارس.
  * Author: Sepand & Narges
- * Version: 2.4.0
+ * Version: 2.5.0
  */
 
 if ( ! defined('ABSPATH') ) exit;
@@ -28,6 +28,9 @@ if ( ! defined('WC_SUF_TEHRANPARS_STORE_ID') ) {
 register_activation_hook(__FILE__, function(){
     global $wpdb;
     $table   = $wpdb->prefix.'stock_audit';
+    $move_table = $wpdb->prefix.'stock_production_moves';
+    $prod_table = $wpdb->prefix.'stock_production_inventory';
+    $move_table = $wpdb->prefix.'stock_production_moves';
     $charset = $wpdb->get_charset_collate();
     require_once ABSPATH.'wp-admin/includes/upgrade.php';
 
@@ -56,7 +59,47 @@ register_activation_hook(__FILE__, function(){
     ) $charset;";
 
     dbDelta($sql);
-    add_option('wc_suf_db_version', '2.4.0');
+
+    $sql_prod = "CREATE TABLE `$prod_table` (
+      `product_id` BIGINT UNSIGNED NOT NULL,
+      `product_name` TEXT NULL,
+      `sku` VARCHAR(191) NULL,
+      `product_type` VARCHAR(40) NULL,
+      `parent_id` BIGINT UNSIGNED NULL,
+      `attributes_text` TEXT NULL,
+      `qty` DECIMAL(20,4) NOT NULL DEFAULT 0,
+      `updated_at` DATETIME NOT NULL,
+      PRIMARY KEY (`product_id`),
+      KEY `updated_at` (`updated_at`)
+    ) $charset;";
+    dbDelta($sql_prod);
+
+    $sql_moves = "CREATE TABLE `$move_table` (
+      `id` BIGINT UNSIGNED AUTO_INCREMENT,
+      `batch_code` VARCHAR(64) NULL,
+      `operation` VARCHAR(20) NOT NULL,
+      `destination` VARCHAR(40) NULL,
+      `product_id` BIGINT UNSIGNED NOT NULL,
+      `product_name` TEXT NULL,
+      `sku` VARCHAR(191) NULL,
+      `product_type` VARCHAR(40) NULL,
+      `parent_id` BIGINT UNSIGNED NULL,
+      `attributes_text` TEXT NULL,
+      `old_qty` DECIMAL(20,4) NOT NULL DEFAULT 0,
+      `change_qty` DECIMAL(20,4) NOT NULL DEFAULT 0,
+      `new_qty` DECIMAL(20,4) NOT NULL DEFAULT 0,
+      `user_id` BIGINT UNSIGNED NULL,
+      `user_login` VARCHAR(60) NULL,
+      `user_code` VARCHAR(128) NULL,
+      `created_at` DATETIME NOT NULL,
+      PRIMARY KEY (`id`),
+      KEY `product_id` (`product_id`),
+      KEY `batch_code` (`batch_code`),
+      KEY `operation` (`operation`),
+      KEY `created_at` (`created_at`)
+    ) $charset;";
+    dbDelta($sql_moves);
+    add_option('wc_suf_db_version', '2.5.0');
 
     if ( get_option('wc_suf_counter_in', null) === null )        add_option('wc_suf_counter_in',  '0', '', false);
     if ( get_option('wc_suf_counter_out', null) === null )       add_option('wc_suf_counter_out', '0', '', false);
@@ -78,6 +121,51 @@ function wc_suf_maybe_upgrade_schema(){
     $exists = $wpdb->get_var( $wpdb->prepare(
         "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = %s", $table
     ) );
+
+    $charset = $wpdb->get_charset_collate();
+    require_once ABSPATH.'wp-admin/includes/upgrade.php';
+
+    $prod_table = $wpdb->prefix.'stock_production_inventory';
+    $move_table = $wpdb->prefix.'stock_production_moves';
+
+    dbDelta("CREATE TABLE `$prod_table` (
+      `product_id` BIGINT UNSIGNED NOT NULL,
+      `product_name` TEXT NULL,
+      `sku` VARCHAR(191) NULL,
+      `product_type` VARCHAR(40) NULL,
+      `parent_id` BIGINT UNSIGNED NULL,
+      `attributes_text` TEXT NULL,
+      `qty` DECIMAL(20,4) NOT NULL DEFAULT 0,
+      `updated_at` DATETIME NOT NULL,
+      PRIMARY KEY (`product_id`),
+      KEY `updated_at` (`updated_at`)
+    ) $charset;");
+
+    dbDelta("CREATE TABLE `$move_table` (
+      `id` BIGINT UNSIGNED AUTO_INCREMENT,
+      `batch_code` VARCHAR(64) NULL,
+      `operation` VARCHAR(20) NOT NULL,
+      `destination` VARCHAR(40) NULL,
+      `product_id` BIGINT UNSIGNED NOT NULL,
+      `product_name` TEXT NULL,
+      `sku` VARCHAR(191) NULL,
+      `product_type` VARCHAR(40) NULL,
+      `parent_id` BIGINT UNSIGNED NULL,
+      `attributes_text` TEXT NULL,
+      `old_qty` DECIMAL(20,4) NOT NULL DEFAULT 0,
+      `change_qty` DECIMAL(20,4) NOT NULL DEFAULT 0,
+      `new_qty` DECIMAL(20,4) NOT NULL DEFAULT 0,
+      `user_id` BIGINT UNSIGNED NULL,
+      `user_login` VARCHAR(60) NULL,
+      `user_code` VARCHAR(128) NULL,
+      `created_at` DATETIME NOT NULL,
+      PRIMARY KEY (`id`),
+      KEY `product_id` (`product_id`),
+      KEY `batch_code` (`batch_code`),
+      KEY `operation` (`operation`),
+      KEY `created_at` (`created_at`)
+    ) $charset;");
+
     if ( ! $exists ) return;
 
     $needed = [
@@ -428,12 +516,55 @@ function wc_suf_yith_change_store_stock( $product, $qty, $store_id, $operation =
 | Helpers (برچسب عملیات و کد ثبت ترتیبی)
 ---------------------------------------*/
 function wc_suf_op_label($op){
-    if ($op === 'out_teh') return 'خروج به تهرانپارس';
-    if ($op === 'in_teh')  return 'ورود مستقیم به تهرانپارس';
-    if ($op === 'out') return 'خروج';
-    if ($op === 'in') return 'ورود';
+    if ($op === 'out_main') return 'خروج به انبار اصلی';
+    if ($op === 'out_teh')  return 'خروج به تهرانپارس';
+    if ($op === 'out')      return 'خروج';
+    if ($op === 'in')       return 'ورود';
     if ($op === 'onlyLabel') return 'فقط لیبل';
     return $op;
+}
+
+function wc_suf_get_product_attributes_text( $product ) {
+    if ( ! $product || ! is_object( $product ) ) return '';
+    $txt = wc_get_formatted_variation( $product, true, false, false );
+    $txt = trim( wp_strip_all_tags( (string) $txt ) );
+    return $txt;
+}
+
+function wc_suf_get_production_stock_qty( $product_id ) {
+    global $wpdb;
+    $table = $wpdb->prefix.'stock_production_inventory';
+    $qty = $wpdb->get_var( $wpdb->prepare("SELECT qty FROM `$table` WHERE product_id = %d", absint($product_id) ) );
+    return (int) ($qty ?? 0);
+}
+
+function wc_suf_update_production_stock_qty( $product, $delta ) {
+    global $wpdb;
+    $table = $wpdb->prefix.'stock_production_inventory';
+
+    $pid = absint( $product->get_id() );
+    $current = wc_suf_get_production_stock_qty( $pid );
+    $new = max( 0, $current + (int) $delta );
+
+    $data = [
+        'product_id'       => $pid,
+        'product_name'     => wc_suf_full_product_label( $product ),
+        'sku'              => $product->get_sku() ?: null,
+        'product_type'     => $product->get_type(),
+        'parent_id'        => $product->is_type('variation') ? $product->get_parent_id() : null,
+        'attributes_text'  => wc_suf_get_product_attributes_text( $product ),
+        'qty'              => $new,
+        'updated_at'       => current_time('mysql'),
+    ];
+
+    $exists = (int) $wpdb->get_var( $wpdb->prepare("SELECT COUNT(*) FROM `$table` WHERE product_id = %d", $pid ) );
+    if ( $exists > 0 ) {
+        $wpdb->update( $table, $data, [ 'product_id' => $pid ], [ '%d','%s','%s','%s','%d','%s','%f','%s' ], [ '%d' ] );
+    } else {
+        $wpdb->insert( $table, $data, [ '%d','%s','%s','%s','%d','%s','%f','%s' ] );
+    }
+
+    return [ $current, $new ];
 }
 
 function wc_suf_next_batch_code( $op_type ){
@@ -561,17 +692,46 @@ add_shortcode('stock_update_form', function($atts){
 
     $picker_attr_defs = wc_suf_get_picker_attribute_defs();
 
+    global $wpdb;
+    $prod_table = $wpdb->prefix.'stock_production_inventory';
+    $prod_rows = $wpdb->get_results( "SELECT product_id, qty FROM `$prod_table`", ARRAY_A );
+    $prod_map = [];
+    if ( is_array($prod_rows) ) {
+        foreach ( $prod_rows as $pr ) {
+            $ppid = isset($pr['product_id']) ? absint($pr['product_id']) : 0;
+            if ( ! $ppid ) continue;
+            $prod_map[$ppid] = (int) ($pr['qty'] ?? 0);
+        }
+    }
+
     $bucketed = [];
     $preferred_order = [4,6,8,12];
     foreach ($products as $p){
-        $stock = (int) max(0, (int) ($p->get_stock_quantity() ?? 0));
+        $pid = $p->get_id();
+        $wc_stock   = (int) max(0, (int) ($p->get_stock_quantity() ?? 0));
+        $prod_stock = isset($prod_map[$pid]) ? (int) $prod_map[$pid] : 0;
+        $teh_stock  = 0;
+        $teh_ok     = 0;
+
+        if ( function_exists('yith_pos_stock_management') ) {
+            $teh_read = wc_suf_yith_get_store_stock( $p, (int) WC_SUF_TEHRANPARS_STORE_ID );
+            if ( false !== $teh_read ) {
+                $teh_stock = (int) $teh_read;
+                $teh_ok = 1;
+            }
+        }
+
         $label = $make_label($p);
         $row = [
-            'id'     => $p->get_id(),
-            'label'  => $label,
-            'stock'  => $stock,
-            'search' => wc_suf_build_search_blob( $p ),
-            'attrs'  => wc_suf_collect_product_attributes_for_picker( $p ),
+            'id'           => $pid,
+            'label'        => $label,
+            'stock'        => $prod_stock,
+            'prod_stock'   => $prod_stock,
+            'wc_stock'     => $wc_stock,
+            'teh_stock'    => $teh_stock,
+            'teh_stock_ok' => $teh_ok,
+            'search'       => wc_suf_build_search_blob( $p ),
+            'attrs'        => wc_suf_collect_product_attributes_for_picker( $p ),
         ];
         $cap = wc_suf_capacity_from_product($p) ?: 0;
         $bucketed[$cap][] = $row;
@@ -616,26 +776,24 @@ add_shortcode('stock_update_form', function($atts){
             <span>خروج از انبار</span>
           </label>
           <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
-            <input type="radio" name="op-type" value="out_teh">
-            <span>خروج به انبار تهرانپارس</span>
-          </label>
-          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
-            <input type="radio" name="op-type" value="in_teh">
-            <span>ورود مستقیم به انبار تهرانپارس</span>
-          </label>
-          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
             <input type="radio" name="op-type" value="onlyLabel">
-            <span>صرفاً فقط لیبل چاپ شود</span>
+            <span>صرفاً چاپ لیبل</span>
           </label>
           <span class="suf-muted">(پس از انتخاب، قابل تغییر نیست مگر با رفرش)</span>
         </div>
 
-            <div id="purpose-wrap" style="display:none; gap:8px; align-items:center; flex-wrap:wrap">
-            <label for="purpose" style="min-width:80px">هدف خروج:</label>
-            <input id="purpose" type="text" style="min-width:320px; padding:8px; border:1px solid #e5e7eb; border-radius:8px">
-            <span class="suf-muted">(حداقل ۴ کاراکتر)</span>
+            
+        <div id="out-destination-wrap" style="display:none; gap:8px; align-items:center; flex-wrap:wrap">
+          <label style="min-width:120px">مقصد خروج:</label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="radio" name="out-destination" value="main">
+            <span>خروج به انبار اصلی</span>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="radio" name="out-destination" value="teh">
+            <span>خروج به انبار تهران پارس</span>
+          </label>
         </div>
-
         <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; opacity:.5" id="picker-open-block">
           <button type="button" id="btn-open-picker" style="padding:12px 18px; cursor:pointer; border:1px solid #10b981; border-radius:10px; background:#bbf7d0; color:#065f46; font-weight:700" disabled>➕ اضافه کردن محصولات</button>
           <span class="suf-muted">ابتدا نوع عملیات را انتخاب کنید، سپس محصولات را در پنجره انتخاب کنید.</span>
@@ -713,7 +871,7 @@ add_shortcode('stock_update_form', function($atts){
 
         const items = [];
         let opType = null;
-        let printLabel = null;
+        let outDestination = null;
 
         const $overlay = $('#wc-suf-modal-overlay');
         const $modal   = $('#wc-suf-modal');
@@ -743,30 +901,81 @@ add_shortcode('stock_update_form', function($atts){
 
         function findById(id){ return allProducts.find(p => String(p.id) === String(id)); }
         function findLabelById(id){ const f = findById(id); return f ? f.label : ''; }
-        function findStockById(id){ const f = findById(id); return f ? (f.stock||0) : 0; }
+        function findProductionStockById(id){ const f = findById(id); return f ? (+f.prod_stock || 0) : 0; }
+        function getPickerMetaLine(p){
+            const pid = String(p.id || '');
+            const prod = (+p.prod_stock || 0);
+            if(opType === 'in'){
+                return `ID: ${pid} | موجودی انبار تولید: ${prod}`;
+            }
+            if(opType === 'out'){
+                if(outDestination === 'main'){
+                    return `ID: ${pid} | موجودی انبار تولید: ${prod} | موجودی انبار اصلی (ووکامرس): ${(+p.wc_stock || 0)}`;
+                }
+                if(outDestination === 'teh'){
+                    const teh = (+p.teh_stock || 0);
+                    const note = (+p.teh_stock_ok || 0) ? '' : ' (نامشخص)';
+                    return `ID: ${pid} | موجودی انبار تولید: ${prod} | موجودی تهران پارس: ${teh}${note}`;
+                }
+                return `ID: ${pid} | موجودی انبار تولید: ${prod}`;
+            }
+            return `ID: ${pid} | موجودی انبار تولید: ${prod}`;
+        }
 
         function canSave(){
-            if(opType !== 'in' && opType !== 'out' && opType !== 'onlyLabel' && opType !== 'out_teh' && opType !== 'in_teh') return false;
+            if(opType !== 'in' && opType !== 'out' && opType !== 'onlyLabel') return false;
+            if(opType === 'out' && !outDestination) return false;
+            return items.length > 0;
+        }
 
-            if(opType === 'onlyLabel'){
-                return items.length > 0;
-            } else if(opType === 'out'){
-                if(printLabel === null) return false;
-                const purpose = $('#purpose').val().trim();
-                if(purpose.length < 4) return false;
-                return items.length > 0;
-            } else if(opType === 'out_teh'){
-                return items.length > 0;
-            } else if(opType === 'in_teh'){
-                return items.length > 0;
+        function canOpenPicker(){
+            if(!opType) return false;
+            if(opType === 'out' && !outDestination) return false;
+            return true;
+        }
+
+        function getDestinationInfoById(id){
+            const p = findById(id);
+            if(!p) return {label:'', stock:0};
+            if(outDestination === 'main'){
+                return {label:'موجودی انبار اصلی', stock:(+p.wc_stock || 0)};
+            }
+            if(outDestination === 'teh'){
+                return {label:'موجودی انبار تهران‌پارس', stock:(+p.teh_stock || 0)};
+            }
+            return {label:'', stock:0};
+        }
+
+        function refreshPickerOpenButton(){
+            const enabled = canOpenPicker();
+            const $btn = $('#btn-open-picker');
+            $('#picker-open-block').css('opacity', enabled ? 1 : 0.5);
+            $btn.prop('disabled', !enabled);
+            if(enabled){
+                $btn.css({background:'#16a34a', borderColor:'#15803d', color:'#ffffff'});
             } else {
-                if(printLabel === null) return false;
-                return items.length > 0;
+                $btn.css({background:'#bbf7d0', borderColor:'#10b981', color:'#065f46'});
             }
         }
 
         function renderTable(){
             const tbody = $('#items-table tbody').empty();
+            const theadRow = $('#items-table thead tr').empty();
+
+            const isOutMain = (opType === 'out' && outDestination === 'main');
+            const isOutTeh  = (opType === 'out' && outDestination === 'teh');
+
+            theadRow.append('<th style="padding:8px; text-align:right; width:110px">ID</th>');
+            theadRow.append('<th style="padding:8px; text-align:right">محصول</th>');
+            theadRow.append('<th style="padding:8px; text-align:center; width:160px">موجودی انبار تولید</th>');
+            if (isOutMain){
+                theadRow.append('<th style="padding:8px; text-align:center; width:170px">موجودی انبار اصلی</th>');
+            } else if (isOutTeh){
+                theadRow.append('<th style="padding:8px; text-align:center; width:180px">موجودی انبار تهران‌پارس</th>');
+            }
+            theadRow.append('<th style="padding:8px; text-align:center; width:280px">تعداد (+/−)</th>');
+            theadRow.append('<th style="padding:8px; text-align:center; width:100px">حذف</th>');
+
             if(items.length === 0){
                 $('#items-table').hide();
                 $('#btn-save').prop('disabled', true).hide();
@@ -780,6 +989,11 @@ add_shortcode('stock_update_form', function($atts){
                 tr.append(`<td style="padding:8px">${escapeHtml(it.id)}</td>`);
                 tr.append(`<td style="padding:8px">${escapeHtml(it.name)}</td>`);
                 tr.append(`<td style="padding:8px; text-align:center">${escapeHtml(it.stock)}</td>`);
+
+                if (isOutMain || isOutTeh){
+                    const dst = getDestinationInfoById(it.id);
+                    tr.append(`<td style="padding:8px; text-align:center">${escapeHtml(dst.stock)}</td>`);
+                }
 
                 const qtyControls = $(`
                   <td style="padding:6px; text-align:center">
@@ -795,7 +1009,7 @@ add_shortcode('stock_update_form', function($atts){
         }
 
         function enforceOutLimit(idx){
-            if(opType !== 'out' && opType !== 'out_teh') return;
+            if(opType !== 'out') return;
             const it = items[idx];
             if(!it) return;
             if(it.qty > it.stock){ it.qty = it.stock; }
@@ -969,14 +1183,15 @@ add_shortcode('stock_update_form', function($atts){
             for (let i=0; i<showList.length; i++){
                 const p = showList[i];
                 const pid = String(p.id);
-                const stock = (p.stock || 0);
+                const stock = (+p.prod_stock || 0);
                 const cur = (pickerQty[pid] != null) ? +pickerQty[pid] : 0;
+                const metaLine = getPickerMetaLine(p);
 
                 frag.push(`
                     <div class="wc-suf-picker-row" data-pid="${escapeHtml(pid)}">
                       <div>
                         <div class="wc-suf-picker-name">${escapeHtml(p.label || ('#'+pid))}</div>
-                        <div class="wc-suf-picker-meta">ID: ${escapeHtml(pid)} | موجودی: ${escapeHtml(stock)}</div>
+                        <div class="wc-suf-picker-meta">${escapeHtml(metaLine)}</div>
                       </div>
                       <div class="wc-suf-picker-qty">
                         <button type="button" class="picker-dec" data-pid="${escapeHtml(pid)}">➖</button>
@@ -991,15 +1206,23 @@ add_shortcode('stock_update_form', function($atts){
             updateSelectedInfo();
         }
 
-        function capQtyForOut(pid, qty){
-            if(opType !== 'out' && opType !== 'out_teh') return qty;
-            const stock = findStockById(pid);
-            if (qty > stock) return stock;
+        function capQtyForOut(pid, qty, showAlert){
+            if(opType !== 'out') return qty;
+            const stock = findProductionStockById(pid);
+            if (qty > stock){
+                if (showAlert){
+                    const name = findLabelById(pid) || ('#'+pid);
+                    alert(`برای "${name}" حداکثر قابل انتخاب ${stock} عدد است (موجودی انبار تولید).`);
+                }
+                return stock;
+            }
             return qty;
         }
 
+        refreshPickerOpenButton();
+
         $('#btn-open-picker').on('click', function(){
-            if(!opType) return;
+            if(!canOpenPicker()) return;
             openModal();
         });
 
@@ -1038,7 +1261,8 @@ add_shortcode('stock_update_form', function($atts){
 
         $results.on('click', '.picker-inc', function(){
             const pid = String($(this).data('pid'));
-            const current = (+pickerQty[pid] || 0) + 1;
+            let current = (+pickerQty[pid] || 0) + 1;
+            current = capQtyForOut(pid, current, true);
             pickerQty[pid] = current;
             $results.find(`.picker-qty[data-pid="${pid}"]`).val(current);
             updateSelectedInfo();
@@ -1057,6 +1281,7 @@ add_shortcode('stock_update_form', function($atts){
             let v = +$(this).val();
             if (!Number.isFinite(v)) v = 0;
             v = Math.max(0, Math.floor(v));
+            v = capQtyForOut(pid, v, true);
             pickerQty[pid] = v;
             $(this).val(v);
             updateSelectedInfo();
@@ -1066,21 +1291,17 @@ add_shortcode('stock_update_form', function($atts){
             if(!opType) return;
 
             let addedAny = false;
-            let cappedAny = false;
 
             for (const pid in pickerQty){
                 let qty = +pickerQty[pid];
                 if (!qty || qty <= 0) continue;
 
                 const name  = findLabelById(pid) || '(بدون نام)';
-                const stock = findStockById(pid);
+                const stock = findProductionStockById(pid);
 
-                if ((opType === 'out' || opType === 'out_teh') && qty > stock){
-                    qty = capQtyForOut(pid, qty);
-                    cappedAny = true;
-                    if (qty <= 0){
-                        continue;
-                    }
+                if (opType === 'out' && qty > stock){
+                    alert(`مقدار انتخابی برای «${name}» بیشتر از موجودی انبار تولید است.`);
+                    return;
                 }
 
                 const existingIdx = items.findIndex(x => String(x.id) === String(pid));
@@ -1101,10 +1322,6 @@ add_shortcode('stock_update_form', function($atts){
                 return;
             }
 
-            if (cappedAny){
-                alert('برای برخی کالاها، تعداد خروج به موجودی محدود شد.');
-            }
-
             for (const pid in pickerQty){
                 if (Object.prototype.hasOwnProperty.call(pickerQty, pid)) pickerQty[pid] = 0;
             }
@@ -1118,45 +1335,27 @@ add_shortcode('stock_update_form', function($atts){
             opType = $(this).val();
 
             $('input[name="op-type"]').prop('disabled', true);
-            $('#btn-open-picker').prop('disabled', false);
 
             if(opType === 'out'){
-                $('#purpose-wrap').css('display','flex');
-                $('#print-block input[name="send-tehran"]').prop('disabled', false);
-            } else if(opType === 'onlyLabel'){
-                $('#purpose-wrap').hide();
-                $('#print-block input[name="send-tehran"][value="1"]').prop('checked', true);
-                $('#print-block input[name="send-tehran"]').prop('disabled', true);
-                printLabel = 1;
-            } else if(opType === 'out_teh'){
-                $('#purpose-wrap').hide();
-                $('#print-block input[name="send-tehran"][value="1"]').prop('checked', true);
-                $('#print-block input[name="send-tehran"]').prop('disabled', true);
-                printLabel = 1;
-
-            } else if(opType === 'in_teh'){
-                $('#purpose-wrap').hide();
-                $('#print-block input[name="send-tehran"][value="1"]').prop('checked', true);
-                $('#print-block input[name="send-tehran"]').prop('disabled', true);
-                printLabel = 1;
+                $('#out-destination-wrap').css('display','flex');
             } else {
-                $('#purpose-wrap').hide();
-                $('#print-block input[name="send-tehran"]').prop('disabled', false);
+                $('#out-destination-wrap').hide();
             }
 
+            refreshPickerOpenButton();
             renderTable();
         });
 
-        $('input[name="send-tehran"]').on('change', function(){
-            if(opType === 'onlyLabel' || opType === 'out_teh' || opType === 'in_teh'){
-                printLabel = 1;
-            } else {
-                printLabel = $(this).val() === '1' ? 1 : 0;
-            }
+        $('input[name="out-destination"]').on('change', function(){
+            if(opType !== 'out') return;
+            outDestination = $(this).val() || null;
+            refreshPickerOpenButton();
             $('#btn-save').prop('disabled', !canSave());
+            renderTable();
+            if ($modal.is(':visible')) {
+                renderPickerResults();
+            }
         });
-
-        $('#purpose').on('input', function(){ $('#btn-save').prop('disabled', !canSave()); });
 
         $('#items-table').on('click','.row-inc', function(){
             const i = +$(this).data('i'); items[i].qty++; enforceOutLimit(i); renderTable();
@@ -1188,9 +1387,8 @@ add_shortcode('stock_update_form', function($atts){
                 action      : 'save_stock_update',
                 items       : JSON.stringify(items),
                 user_code   : userCode,
-                send_tehran : String(printLabel === null ? '' : printLabel),
+                out_destination : String(outDestination || ''),
                 op_type     : opType,
-                purpose     : $('#purpose').val() || '',
                 _wpnonce    : '<?php echo wp_create_nonce('save_stock_update'); ?>'
             }).done(function(res){
                 try{
@@ -1232,29 +1430,21 @@ function wc_suf_save_stock_update_handler(){
 
     $user_code   = isset($_POST['user_code']) ? sanitize_text_field( wp_unslash($_POST['user_code']) ) : '';
     $op_type_in  = isset($_POST['op_type']) ? sanitize_text_field( wp_unslash($_POST['op_type']) ) : '';
-    $op_type     = in_array($op_type_in, ['in','out','onlyLabel','out_teh','in_teh'], true) ? $op_type_in : '';
-    $purpose     = isset($_POST['purpose']) ? sanitize_text_field( wp_unslash($_POST['purpose']) ) : '';
+    $op_type     = in_array($op_type_in, ['in','out','onlyLabel'], true) ? $op_type_in : '';
 
     if( ! $op_type ){
-        wp_send_json_error(['message'=>'نوع عملیات مشخص نیست (ورود/خروج/فقط لیبل/خروج به تهرانپارس/ورود مستقیم به تهرانپارس).']);
+        wp_send_json_error(['message'=>'نوع عملیات مشخص نیست (ورود/خروج/صرفاً چاپ لیبل).']);
     }
 
+    $out_destination = isset($_POST['out_destination']) ? sanitize_text_field( wp_unslash($_POST['out_destination']) ) : '';
     $transfer_store_id = null;
-    $effective_op_for_stock = $op_type;
-    if ( $op_type === 'out_teh' ) {
-        $transfer_store_id = (int) WC_SUF_TEHRANPARS_STORE_ID;
-        $effective_op_for_stock = 'out';
-    } elseif ( $op_type === 'in_teh' ) {
-        $transfer_store_id = (int) WC_SUF_TEHRANPARS_STORE_ID;
-        $effective_op_for_stock = 'noop';
-    }
-
-    $print_label = ($op_type === 'onlyLabel' || $op_type === 'out_teh' || $op_type === 'in_teh')
-        ? 1
-        : ( ( isset($_POST['send_tehran']) && $_POST['send_tehran'] === '1' ) ? 1 : 0 );
-
-    if( $op_type === 'out' && mb_strlen($purpose) < 4 ){
-        wp_send_json_error(['message'=>'هدف خروج باید حداقل ۴ کاراکتر باشد.']);
+    if ( $op_type === 'out' ) {
+        if ( ! in_array( $out_destination, ['main','teh'], true ) ) {
+            wp_send_json_error(['message'=>'مقصد خروج مشخص نیست.']);
+        }
+        if ( $out_destination === 'teh' ) {
+            $transfer_store_id = (int) WC_SUF_TEHRANPARS_STORE_ID;
+        }
     }
 
     $user      = wp_get_current_user();
@@ -1265,7 +1455,7 @@ function wc_suf_save_stock_update_handler(){
     global $wpdb;
     $table   = $wpdb->prefix.'stock_audit';
 
-    if ($effective_op_for_stock === 'out') {
+    if ($op_type === 'out') {
         $insufficient = [];
         foreach($items as $it){
             $pid = isset($it['id'])  ? absint($it['id']) : 0;
@@ -1274,17 +1464,8 @@ function wc_suf_save_stock_update_handler(){
 
             $product = wc_get_product($pid);
             if( ! $product ) continue;
-            $stock_product = wc_suf_get_stock_product( $product );
-
-            if( ! $stock_product->managing_stock() ){
-                $stock_product->set_manage_stock(true);
-                if( $stock_product->get_stock_quantity() === null ){
-                    $stock_product->set_stock_quantity(0);
-                }
-                $stock_product->save();
-            }
-            $old   = (int) $stock_product->get_stock_quantity();
-            $pname = $stock_product->get_name() ?: ('#'.$pid);
+            $old   = wc_suf_get_production_stock_qty( $pid );
+            $pname = wc_suf_full_product_label( $product );
 
             if( $req > $old ){
                 $insufficient[] = [
@@ -1306,10 +1487,7 @@ function wc_suf_save_stock_update_handler(){
         }
     }
 
-    $batch_code = wc_suf_next_batch_code(
-        $effective_op_for_stock === 'out' ? 'out' :
-        ( $op_type === 'in_teh' ? 'in' : $op_type )
-    );
+    $batch_code = wc_suf_next_batch_code( $op_type === 'out' ? 'out' : $op_type );
 
     $inserted = 0;
     $rows_for_sheet = [];
@@ -1334,13 +1512,16 @@ function wc_suf_save_stock_update_handler(){
         $old_qty = (int) ( $stock_product->get_stock_quantity() ?? 0 );
         $pname   = $stock_product->get_name();
 
-        if( $effective_op_for_stock === 'out' ){
-            wc_update_product_stock($stock_product, $req, 'decrease');
-            $stock_product->save();
-            $new_qty      = (int) $stock_product->get_stock_quantity();
+        if( $op_type === 'out' ){
+            list($prod_old, $prod_new) = wc_suf_update_production_stock_qty( $product, -$req );
+            $old_qty      = $prod_old;
+            $new_qty      = $prod_new;
             $logged_added = $req;
 
-            if ( $op_type === 'out_teh' && $transfer_store_id ) {
+            if ( $out_destination === 'main' ) {
+                wc_update_product_stock($stock_product, $req, 'increase');
+                $stock_product->save();
+            } elseif ( $out_destination === 'teh' ) {
                 $store_result  = wc_suf_yith_change_store_stock( $stock_product, $req, $transfer_store_id, 'increase' );
                 if ( is_wp_error( $store_result ) ) {
                     wp_send_json_error(['message'=>'افزایش موجودی استور YITH ناموفق: '.$store_result->get_error_message()]);
@@ -1348,18 +1529,10 @@ function wc_suf_save_stock_update_handler(){
             }
 
         } elseif( $op_type === 'in' ){
-            wc_update_product_stock($stock_product, $req, 'increase');
-            $stock_product->save();
-            $new_qty      = (int) $stock_product->get_stock_quantity();
+            list($prod_old, $prod_new) = wc_suf_update_production_stock_qty( $product, $req );
+            $old_qty      = $prod_old;
+            $new_qty      = $prod_new;
             $logged_added = $req;
-
-        } elseif( $op_type === 'in_teh' ){
-            $store_result  = wc_suf_yith_change_store_stock( $stock_product, $req, $transfer_store_id, 'increase' );
-            if ( is_wp_error( $store_result ) ) {
-                wp_send_json_error(['message'=>'افزایش موجودی استور YITH ناموفق: '.$store_result->get_error_message()]);
-            }
-            $new_qty       = $old_qty;
-            $logged_added  = $req;
 
         } else {
             $new_qty      = $old_qty;
@@ -1368,11 +1541,11 @@ function wc_suf_save_stock_update_handler(){
 
         $data = [
             'batch_code'   => $batch_code,
-            'op_type'      => ($effective_op_for_stock === 'out') ? 'out' : $op_type,
-            'purpose'      => ($op_type === 'out') ? $purpose
-                            : ( $op_type === 'out_teh' ? 'انتقال به انبار تهرانپارس'
-                              : ( $op_type === 'in_teh' ? 'ورود مستقیم به انبار تهرانپارس' : null ) ),
-            'print_label'  => ($op_type === 'out_teh' || $op_type === 'in_teh') ? 1 : $print_label,
+            'op_type'      => ( $op_type === 'out' && $out_destination === 'teh' ) ? 'out_teh' : ( $op_type === 'out' ? 'out_main' : $op_type ),
+            'purpose'      => ($op_type === 'out')
+                            ? ( $out_destination === 'teh' ? 'انتقال به انبار تهرانپارس' : 'خروج به انبار اصلی' )
+                            : null,
+            'print_label'  => ($op_type === 'onlyLabel') ? 1 : 0,
             'product_id'   => $pid,
             'product_name' => $pname,
             'old_qty'      => $old_qty,
@@ -1393,26 +1566,46 @@ function wc_suf_save_stock_update_handler(){
             $inserted++;
         }
 
+        if ( in_array( $op_type, ['in','out'], true ) ) {
+            $move_data = [
+                'batch_code'      => $batch_code,
+                'operation'       => $op_type,
+                'destination'     => ( $op_type === 'out' ) ? $out_destination : 'production',
+                'product_id'      => $pid,
+                'product_name'    => wc_suf_full_product_label( $product ),
+                'sku'             => $product->get_sku() ?: null,
+                'product_type'    => $product->get_type(),
+                'parent_id'       => $product->is_type('variation') ? $product->get_parent_id() : null,
+                'attributes_text' => wc_suf_get_product_attributes_text( $product ),
+                'old_qty'         => (float) $old_qty,
+                'change_qty'      => (float) $req,
+                'new_qty'         => (float) $new_qty,
+                'user_id'         => $uid ?: null,
+                'user_login'      => $ulog ?: null,
+                'user_code'       => $user_code ?: null,
+                'created_at'      => current_time('mysql'),
+            ];
+            $wpdb->insert(
+                $move_table,
+                $move_data,
+                ['%s','%s','%s','%d','%s','%s','%s','%d','%s','%f','%f','%f','%d','%s','%s','%s']
+            );
+        }
+
         $full_name = wc_suf_full_product_label($product);
         $price = wc_get_price_to_display( $product );
         for ($i=0; $i<$req; $i++){
             $rows_for_sheet[] = [
                 'batch_code' => (string) $batch_code,
                 'op'         => (string) (
-                    $effective_op_for_stock === 'out' ? 'out' :
-                    ( $op_type === 'onlyLabel' ? 'onlyLabel' :
-                      ( $op_type === 'in_teh' ? 'in_teh' : $op_type )
-                    )
+                    $op_type === 'out' ? ( $out_destination === 'teh' ? 'out_teh' : 'out_main' ) : $op_type
                 ),
-                'print_label'=> (int)    ( $op_type === 'out_teh' || $op_type === 'in_teh' ? 1 : $print_label ),
+                'print_label'=> (int)    ( $op_type === 'onlyLabel' ? 1 : 0 ),
                 'id'         => (string) $pid,
                 'name'       => (string) $full_name,
                 'price'      => (float)  $price,
                 'purpose'    => (string) (
-                    $op_type === 'out' ? $purpose :
-                    ( $op_type === 'out_teh' ? 'انتقال به انبار تهرانپارس' :
-                      ( $op_type === 'in_teh' ? 'ورود مستقیم به انبار تهرانپارس' : '' )
-                    )
+                    $op_type === 'out' ? ( $out_destination === 'teh' ? 'انتقال به انبار تهرانپارس' : 'خروج به انبار اصلی' ) : ''
                 ),
             ];
         }
@@ -1451,7 +1644,7 @@ function wc_suf_save_stock_update_handler(){
         wp_send_json_error(['message'=>$msg]);
     }
 
-    $op_label = wc_suf_op_label( ($effective_op_for_stock === 'out') ? 'out' : $op_type );
+    $op_label = wc_suf_op_label( $op_type === 'out' ? ( $out_destination === 'teh' ? 'out_teh' : 'out_main' ) : $op_type );
     wp_send_json_success(['message'=>"ثبت {$op_label} انجام شد. کد ثبت: {$batch_code}"]);
 }
 
@@ -1519,7 +1712,7 @@ function wc_suf_render_audit_html($args = []){
             $op_for_batch = $wpdb->get_var( $wpdb->prepare(
                 "SELECT MAX(op_type) FROM $table WHERE batch_code=%s", $code
             ) );
-            if ( in_array( $op_for_batch, ['out','out_teh'], true ) ) {
+            if ( in_array( $op_for_batch, ['out','out_main','out_teh'], true ) ) {
                 $pur = $wpdb->get_var( $wpdb->prepare(
                     "SELECT purpose FROM $table WHERE batch_code=%s AND purpose IS NOT NULL AND purpose<>'' LIMIT 1", $code
                 ) );
