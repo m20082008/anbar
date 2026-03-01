@@ -794,6 +794,19 @@ add_shortcode('stock_update_form', function($atts){
             <span>خروج به انبار تهران پارس</span>
           </label>
         </div>
+
+            
+        <div id="out-destination-wrap" style="display:none; gap:8px; align-items:center; flex-wrap:wrap">
+          <label style="min-width:120px">مقصد خروج:</label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="radio" name="out-destination" value="main">
+            <span>خروج به انبار اصلی</span>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="radio" name="out-destination" value="teh">
+            <span>خروج به انبار تهران پارس</span>
+          </label>
+        </div>
         <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; opacity:.5" id="picker-open-block">
           <button type="button" id="btn-open-picker" style="padding:12px 18px; cursor:pointer; border:1px solid #10b981; border-radius:10px; background:#bbf7d0; color:#065f46; font-weight:700" disabled>➕ اضافه کردن محصولات</button>
           <span class="suf-muted">ابتدا نوع عملیات را انتخاب کنید، سپس محصولات را در پنجره انتخاب کنید.</span>
@@ -1157,7 +1170,7 @@ add_shortcode('stock_update_form', function($atts){
 
         function capQtyForOut(pid, qty){
             if(opType !== 'out') return qty;
-            const stock = findProductionStockById(pid);
+            const stock = findStockById(pid);
             if (qty > stock) return stock;
             return qty;
         }
@@ -1286,8 +1299,10 @@ add_shortcode('stock_update_form', function($atts){
 
             if(opType === 'out'){
                 $('#out-destination-wrap').css('display','flex');
+                $('#purpose-wrap').hide();
             } else {
                 $('#out-destination-wrap').hide();
+                $('#purpose-wrap').hide();
             }
 
             renderTable();
