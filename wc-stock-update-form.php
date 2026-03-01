@@ -830,7 +830,7 @@ add_shortcode('stock_update_form', function($atts){
           <div style="font-weight:700; min-width:220px">نوع عملیات موجودی / لیبل</div>
           <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
             <input type="radio" name="op-type" value="in">
-            <span>ورود به انبار</span>
+            <span>ورود به انبار تولید</span>
           </label>
           <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
             <input type="radio" name="op-type" value="out">
@@ -894,7 +894,7 @@ add_shortcode('stock_update_form', function($atts){
             <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:1; min-width:260px">
               <label for="wc-suf-picker-q" style="min-width:80px; font-weight:700">جستجو:</label>
               <input id="wc-suf-picker-q" type="text" placeholder="مثلاً توران / توران ۶ نفره / زرشکی" style="flex:1; min-width:260px; padding:10px; border:1px solid #e5e7eb; border-radius:12px; font-size:16px">
-              <button type="button" id="wc-suf-picker-clear" style="padding:10px 12px; border:1px solid #e5e7eb; background:#fff; border-radius:12px; cursor:pointer">پاک کردن</button>
+              <button type="button" id="wc-suf-picker-clear" aria-label="پاک کردن جستجو" title="پاک کردن" style="width:44px; height:44px; display:inline-flex; align-items:center; justify-content:center; padding:0; border:1px solid #2563eb; background:#2563eb; color:#fff; border-radius:12px; cursor:pointer; font-size:18px; font-weight:800">✕</button>
             </div>
 
             <div style="width:100%; margin-top:8px">
@@ -971,7 +971,7 @@ add_shortcode('stock_update_form', function($atts){
             }
             if(opType === 'out'){
                 if(outDestination === 'main'){
-                    return `ID: ${pid} | موجودی انبار تولید: ${prod} | موجودی انبار اصلی (ووکامرس): ${(+p.wc_stock || 0)}`;
+                    return `ID: ${pid} | موجودی انبار تولید: ${prod} | موجودی انبار اصلی: ${(+p.wc_stock || 0)}`;
                 }
                 if(outDestination === 'teh'){
                     const teh = (+p.teh_stock || 0);
