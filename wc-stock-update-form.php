@@ -692,17 +692,46 @@ add_shortcode('stock_update_form', function($atts){
 
     $picker_attr_defs = wc_suf_get_picker_attribute_defs();
 
+    global $wpdb;
+    $prod_table = $wpdb->prefix.'stock_production_inventory';
+    $prod_rows = $wpdb->get_results( "SELECT product_id, qty FROM `$prod_table`", ARRAY_A );
+    $prod_map = [];
+    if ( is_array($prod_rows) ) {
+        foreach ( $prod_rows as $pr ) {
+            $ppid = isset($pr['product_id']) ? absint($pr['product_id']) : 0;
+            if ( ! $ppid ) continue;
+            $prod_map[$ppid] = (int) ($pr['qty'] ?? 0);
+        }
+    }
+
     $bucketed = [];
     $preferred_order = [4,6,8,12];
     foreach ($products as $p){
-        $stock = (int) max(0, (int) ($p->get_stock_quantity() ?? 0));
+        $pid = $p->get_id();
+        $wc_stock   = (int) max(0, (int) ($p->get_stock_quantity() ?? 0));
+        $prod_stock = isset($prod_map[$pid]) ? (int) $prod_map[$pid] : 0;
+        $teh_stock  = 0;
+        $teh_ok     = 0;
+
+        if ( function_exists('yith_pos_stock_management') ) {
+            $teh_read = wc_suf_yith_get_store_stock( $p, (int) WC_SUF_TEHRANPARS_STORE_ID );
+            if ( false !== $teh_read ) {
+                $teh_stock = (int) $teh_read;
+                $teh_ok = 1;
+            }
+        }
+
         $label = $make_label($p);
         $row = [
-            'id'     => $p->get_id(),
-            'label'  => $label,
-            'stock'  => $stock,
-            'search' => wc_suf_build_search_blob( $p ),
-            'attrs'  => wc_suf_collect_product_attributes_for_picker( $p ),
+            'id'           => $pid,
+            'label'        => $label,
+            'stock'        => $prod_stock,
+            'prod_stock'   => $prod_stock,
+            'wc_stock'     => $wc_stock,
+            'teh_stock'    => $teh_stock,
+            'teh_stock_ok' => $teh_ok,
+            'search'       => wc_suf_build_search_blob( $p ),
+            'attrs'        => wc_suf_collect_product_attributes_for_picker( $p ),
         ];
         $cap = wc_suf_capacity_from_product($p) ?: 0;
         $bucketed[$cap][] = $row;
@@ -766,12 +795,18 @@ add_shortcode('stock_update_form', function($atts){
           </label>
         </div>
 
-            <div id="purpose-wrap" style="display:none; gap:8px; align-items:center; flex-wrap:wrap">
-            <label for="purpose" style="min-width:80px">هدف خروج:</label>
-            <input id="purpose" type="text" style="min-width:320px; padding:8px; border:1px solid #e5e7eb; border-radius:8px">
-            <span class="suf-muted">(حداقل ۴ کاراکتر)</span>
+            
+        <div id="out-destination-wrap" style="display:none; gap:8px; align-items:center; flex-wrap:wrap">
+          <label style="min-width:120px">مقصد خروج:</label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="radio" name="out-destination" value="main">
+            <span>خروج به انبار اصلی</span>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="radio" name="out-destination" value="teh">
+            <span>خروج به انبار تهران پارس</span>
+          </label>
         </div>
-
         <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; opacity:.5" id="picker-open-block">
           <button type="button" id="btn-open-picker" style="padding:12px 18px; cursor:pointer; border:1px solid #10b981; border-radius:10px; background:#bbf7d0; color:#065f46; font-weight:700" disabled>➕ اضافه کردن محصولات</button>
           <span class="suf-muted">ابتدا نوع عملیات را انتخاب کنید، سپس محصولات را در پنجره انتخاب کنید.</span>
@@ -879,7 +914,26 @@ add_shortcode('stock_update_form', function($atts){
 
         function findById(id){ return allProducts.find(p => String(p.id) === String(id)); }
         function findLabelById(id){ const f = findById(id); return f ? f.label : ''; }
-        function findStockById(id){ const f = findById(id); return f ? (f.stock||0) : 0; }
+        function findProductionStockById(id){ const f = findById(id); return f ? (+f.prod_stock || 0) : 0; }
+        function getPickerMetaLine(p){
+            const pid = String(p.id || '');
+            const prod = (+p.prod_stock || 0);
+            if(opType === 'in'){
+                return `ID: ${pid} | موجودی انبار تولید: ${prod}`;
+            }
+            if(opType === 'out'){
+                if(outDestination === 'main'){
+                    return `ID: ${pid} | موجودی انبار تولید: ${prod} | موجودی انبار اصلی (ووکامرس): ${(+p.wc_stock || 0)}`;
+                }
+                if(outDestination === 'teh'){
+                    const teh = (+p.teh_stock || 0);
+                    const note = (+p.teh_stock_ok || 0) ? '' : ' (نامشخص)';
+                    return `ID: ${pid} | موجودی انبار تولید: ${prod} | موجودی تهران پارس: ${teh}${note}`;
+                }
+                return `ID: ${pid} | موجودی انبار تولید: ${prod}`;
+            }
+            return `ID: ${pid} | موجودی انبار تولید: ${prod}`;
+        }
 
         function canSave(){
             if(opType !== 'in' && opType !== 'out' && opType !== 'onlyLabel') return false;
@@ -889,6 +943,22 @@ add_shortcode('stock_update_form', function($atts){
 
         function renderTable(){
             const tbody = $('#items-table tbody').empty();
+            const theadRow = $('#items-table thead tr').empty();
+
+            const isOutMain = (opType === 'out' && outDestination === 'main');
+            const isOutTeh  = (opType === 'out' && outDestination === 'teh');
+
+            theadRow.append('<th style="padding:8px; text-align:right; width:110px">ID</th>');
+            theadRow.append('<th style="padding:8px; text-align:right">محصول</th>');
+            theadRow.append('<th style="padding:8px; text-align:center; width:160px">موجودی انبار تولید</th>');
+            if (isOutMain){
+                theadRow.append('<th style="padding:8px; text-align:center; width:170px">موجودی انبار اصلی</th>');
+            } else if (isOutTeh){
+                theadRow.append('<th style="padding:8px; text-align:center; width:180px">موجودی انبار تهران‌پارس</th>');
+            }
+            theadRow.append('<th style="padding:8px; text-align:center; width:280px">تعداد (+/−)</th>');
+            theadRow.append('<th style="padding:8px; text-align:center; width:100px">حذف</th>');
+
             if(items.length === 0){
                 $('#items-table').hide();
                 $('#btn-save').prop('disabled', true).hide();
@@ -902,6 +972,11 @@ add_shortcode('stock_update_form', function($atts){
                 tr.append(`<td style="padding:8px">${escapeHtml(it.id)}</td>`);
                 tr.append(`<td style="padding:8px">${escapeHtml(it.name)}</td>`);
                 tr.append(`<td style="padding:8px; text-align:center">${escapeHtml(it.stock)}</td>`);
+
+                if (isOutMain || isOutTeh){
+                    const dst = getDestinationInfoById(it.id);
+                    tr.append(`<td style="padding:8px; text-align:center">${escapeHtml(dst.stock)}</td>`);
+                }
 
                 const qtyControls = $(`
                   <td style="padding:6px; text-align:center">
@@ -1091,14 +1166,15 @@ add_shortcode('stock_update_form', function($atts){
             for (let i=0; i<showList.length; i++){
                 const p = showList[i];
                 const pid = String(p.id);
-                const stock = (p.stock || 0);
+                const stock = (+p.prod_stock || 0);
                 const cur = (pickerQty[pid] != null) ? +pickerQty[pid] : 0;
+                const metaLine = getPickerMetaLine(p);
 
                 frag.push(`
                     <div class="wc-suf-picker-row" data-pid="${escapeHtml(pid)}">
                       <div>
                         <div class="wc-suf-picker-name">${escapeHtml(p.label || ('#'+pid))}</div>
-                        <div class="wc-suf-picker-meta">ID: ${escapeHtml(pid)} | موجودی: ${escapeHtml(stock)}</div>
+                        <div class="wc-suf-picker-meta">${escapeHtml(metaLine)}</div>
                       </div>
                       <div class="wc-suf-picker-qty">
                         <button type="button" class="picker-dec" data-pid="${escapeHtml(pid)}">➖</button>
@@ -1120,8 +1196,10 @@ add_shortcode('stock_update_form', function($atts){
             return qty;
         }
 
+        refreshPickerOpenButton();
+
         $('#btn-open-picker').on('click', function(){
-            if(!opType) return;
+            if(!canOpenPicker()) return;
             openModal();
         });
 
@@ -1160,7 +1238,8 @@ add_shortcode('stock_update_form', function($atts){
 
         $results.on('click', '.picker-inc', function(){
             const pid = String($(this).data('pid'));
-            const current = (+pickerQty[pid] || 0) + 1;
+            let current = (+pickerQty[pid] || 0) + 1;
+            current = capQtyForOut(pid, current, true);
             pickerQty[pid] = current;
             $results.find(`.picker-qty[data-pid="${pid}"]`).val(current);
             updateSelectedInfo();
@@ -1179,6 +1258,7 @@ add_shortcode('stock_update_form', function($atts){
             let v = +$(this).val();
             if (!Number.isFinite(v)) v = 0;
             v = Math.max(0, Math.floor(v));
+            v = capQtyForOut(pid, v, true);
             pickerQty[pid] = v;
             $(this).val(v);
             updateSelectedInfo();
@@ -1188,14 +1268,13 @@ add_shortcode('stock_update_form', function($atts){
             if(!opType) return;
 
             let addedAny = false;
-            let cappedAny = false;
 
             for (const pid in pickerQty){
                 let qty = +pickerQty[pid];
                 if (!qty || qty <= 0) continue;
 
                 const name  = findLabelById(pid) || '(بدون نام)';
-                const stock = findStockById(pid);
+                const stock = findProductionStockById(pid);
 
                 if (opType === 'out' && qty > stock){
                     qty = capQtyForOut(pid, qty);
@@ -1223,10 +1302,6 @@ add_shortcode('stock_update_form', function($atts){
                 return;
             }
 
-            if (cappedAny){
-                alert('برای برخی کالاها، تعداد خروج به موجودی محدود شد.');
-            }
-
             for (const pid in pickerQty){
                 if (Object.prototype.hasOwnProperty.call(pickerQty, pid)) pickerQty[pid] = 0;
             }
@@ -1240,7 +1315,6 @@ add_shortcode('stock_update_form', function($atts){
             opType = $(this).val();
 
             $('input[name="op-type"]').prop('disabled', true);
-            $('#btn-open-picker').prop('disabled', false);
 
             if(opType === 'out'){
                 $('#out-destination-wrap').css('display','flex');
@@ -1250,6 +1324,7 @@ add_shortcode('stock_update_form', function($atts){
                 $('#purpose-wrap').hide();
             }
 
+            refreshPickerOpenButton();
             renderTable();
         });
 
@@ -1257,6 +1332,10 @@ add_shortcode('stock_update_form', function($atts){
             if(opType !== 'out') return;
             outDestination = $(this).val() || null;
             $('#btn-save').prop('disabled', !canSave());
+            renderTable();
+            if ($modal.is(':visible')) {
+                renderPickerResults();
+            }
         });
 
         $('#items-table').on('click','.row-inc', function(){
