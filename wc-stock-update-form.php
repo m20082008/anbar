@@ -794,6 +794,19 @@ add_shortcode('stock_update_form', function($atts){
             <span>خروج به انبار تهران پارس</span>
           </label>
         </div>
+
+            
+        <div id="out-destination-wrap" style="display:none; gap:8px; align-items:center; flex-wrap:wrap">
+          <label style="min-width:120px">مقصد خروج:</label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="radio" name="out-destination" value="main">
+            <span>خروج به انبار اصلی</span>
+          </label>
+          <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
+            <input type="radio" name="out-destination" value="teh">
+            <span>خروج به انبار تهران پارس</span>
+          </label>
+        </div>
         <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; opacity:.5" id="picker-open-block">
           <button type="button" id="btn-open-picker" style="padding:12px 18px; cursor:pointer; border:1px solid #10b981; border-radius:10px; background:#bbf7d0; color:#065f46; font-weight:700" disabled>➕ اضافه کردن محصولات</button>
           <span class="suf-muted">ابتدا نوع عملیات را انتخاب کنید، سپس محصولات را در پنجره انتخاب کنید.</span>
@@ -926,36 +939,6 @@ add_shortcode('stock_update_form', function($atts){
             if(opType !== 'in' && opType !== 'out' && opType !== 'onlyLabel') return false;
             if(opType === 'out' && !outDestination) return false;
             return items.length > 0;
-        }
-
-        function canOpenPicker(){
-            if(!opType) return false;
-            if(opType === 'out' && !outDestination) return false;
-            return true;
-        }
-
-        function getDestinationInfoById(id){
-            const p = findById(id);
-            if(!p) return {label:'', stock:0};
-            if(outDestination === 'main'){
-                return {label:'موجودی انبار اصلی', stock:(+p.wc_stock || 0)};
-            }
-            if(outDestination === 'teh'){
-                return {label:'موجودی انبار تهران‌پارس', stock:(+p.teh_stock || 0)};
-            }
-            return {label:'', stock:0};
-        }
-
-        function refreshPickerOpenButton(){
-            const enabled = canOpenPicker();
-            const $btn = $('#btn-open-picker');
-            $('#picker-open-block').css('opacity', enabled ? 1 : 0.5);
-            $btn.prop('disabled', !enabled);
-            if(enabled){
-                $btn.css({background:'#16a34a', borderColor:'#15803d', color:'#ffffff'});
-            } else {
-                $btn.css({background:'#bbf7d0', borderColor:'#10b981', color:'#065f46'});
-            }
         }
 
         function renderTable(){
@@ -1206,16 +1189,10 @@ add_shortcode('stock_update_form', function($atts){
             updateSelectedInfo();
         }
 
-        function capQtyForOut(pid, qty, showAlert){
+        function capQtyForOut(pid, qty){
             if(opType !== 'out') return qty;
-            const stock = findProductionStockById(pid);
-            if (qty > stock){
-                if (showAlert){
-                    const name = findLabelById(pid) || ('#'+pid);
-                    alert(`برای "${name}" حداکثر قابل انتخاب ${stock} عدد است (موجودی انبار تولید).`);
-                }
-                return stock;
-            }
+            const stock = findStockById(pid);
+            if (qty > stock) return stock;
             return qty;
         }
 
@@ -1300,8 +1277,11 @@ add_shortcode('stock_update_form', function($atts){
                 const stock = findProductionStockById(pid);
 
                 if (opType === 'out' && qty > stock){
-                    alert(`مقدار انتخابی برای «${name}» بیشتر از موجودی انبار تولید است.`);
-                    return;
+                    qty = capQtyForOut(pid, qty);
+                    cappedAny = true;
+                    if (qty <= 0){
+                        continue;
+                    }
                 }
 
                 const existingIdx = items.findIndex(x => String(x.id) === String(pid));
@@ -1338,8 +1318,10 @@ add_shortcode('stock_update_form', function($atts){
 
             if(opType === 'out'){
                 $('#out-destination-wrap').css('display','flex');
+                $('#purpose-wrap').hide();
             } else {
                 $('#out-destination-wrap').hide();
+                $('#purpose-wrap').hide();
             }
 
             refreshPickerOpenButton();
@@ -1349,7 +1331,6 @@ add_shortcode('stock_update_form', function($atts){
         $('input[name="out-destination"]').on('change', function(){
             if(opType !== 'out') return;
             outDestination = $(this).val() || null;
-            refreshPickerOpenButton();
             $('#btn-save').prop('disabled', !canSave());
             renderTable();
             if ($modal.is(':visible')) {
