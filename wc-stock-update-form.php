@@ -705,7 +705,7 @@ function wc_suf_enqueue_front_assets() {
     .wc-suf-filter-grid{ display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     .wc-suf-filter-grid .wc-suf-filter{ display:flex; gap:6px; align-items:center; }
     .wc-suf-filter-grid label{ font-weight:700; font-size:13px; color:#111827; }
-    .wc-suf-filter-grid select{ padding:10px 10px; border:1px solid #e5e7eb; border-radius:12px; font-size:14px; background:#fff; min-width:190px; max-width:260px; }
+    .wc-suf-filter-grid select{ padding:9px 8px; border:1px solid #e5e7eb; border-radius:12px; font-size:13px; background:#fff; min-width:140px; max-width:180px; }
     ';
     wp_register_style('wc-suf-ui', false, [], '2.4.0');
     wp_enqueue_style('wc-suf-ui');
@@ -1067,6 +1067,24 @@ add_shortcode('stock_update_form', function($atts){
                 tr.append(`<td style="padding:8px; text-align:center"><button data-i="${idx}" class="btn-del" style="cursor:pointer">❌</button></td>`);
                 tbody.append(tr);
             });
+        }
+
+        function buildSubmitConfirmMessage(){
+            const typeCount = items.length;
+            const totalQty = items.reduce((sum, it) => sum + (parseInt(it.qty, 10) || 0), 0);
+
+            if(opType === 'in'){
+                return `در حال ورود ${typeCount} نوع محصول با مجموع ${totalQty} آیتم به انبار تولید هستید. آیا مطمئنید؟`;
+            }
+
+            if(opType === 'out'){
+                let destinationLabel = 'انبار مقصد';
+                if(outDestination === 'main') destinationLabel = 'انبار اصلی';
+                if(outDestination === 'teh') destinationLabel = 'انبار تهران پارس';
+                return `در حال خروج ${typeCount} نوع محصول و مجموعاً ${totalQty} آیتم کالا از انبار تولید به ${destinationLabel} هستید. آیا مطمئن هستید؟`;
+            }
+
+            return '';
         }
 
         function enforceOutLimit(idx){
@@ -1438,6 +1456,14 @@ add_shortcode('stock_update_form', function($atts){
         $('#btn-save').on('click', function(){
             if (submitting) return;
             if (!canSave()) return;
+
+            if (opType === 'in' || opType === 'out'){
+                const ok = window.confirm(buildSubmitConfirmMessage());
+                if (!ok){
+                    return;
+                }
+            }
+
             submitting = true;
 
             const $btn = $(this);
