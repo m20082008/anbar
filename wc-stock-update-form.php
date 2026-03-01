@@ -538,6 +538,59 @@ function wc_suf_get_production_stock_qty( $product_id ) {
     return (int) ($qty ?? 0);
 }
 
+function wc_suf_ensure_production_inventory_row( $product ) {
+    global $wpdb;
+    $table = $wpdb->prefix.'stock_production_inventory';
+    $pid   = absint( $product->get_id() );
+    if ( ! $pid ) return;
+
+    $wpdb->query( $wpdb->prepare(
+        "INSERT IGNORE INTO `$table` (`product_id`,`product_name`,`sku`,`product_type`,`parent_id`,`attributes_text`,`qty`,`updated_at`) VALUES (%d,%s,%s,%s,%d,%s,%f,%s)",
+        $pid,
+        wc_suf_full_product_label( $product ),
+        $product->get_sku() ?: null,
+        $product->get_type(),
+        $product->is_type('variation') ? $product->get_parent_id() : null,
+        wc_suf_get_product_attributes_text( $product ),
+        0,
+        current_time('mysql')
+    ) );
+}
+
+function wc_suf_get_production_stock_qty_for_update( $product ) {
+    global $wpdb;
+    $table = $wpdb->prefix.'stock_production_inventory';
+    $pid   = absint( $product->get_id() );
+    if ( ! $pid ) return 0;
+
+    wc_suf_ensure_production_inventory_row( $product );
+    $qty = $wpdb->get_var( $wpdb->prepare(
+        "SELECT qty FROM `$table` WHERE product_id = %d FOR UPDATE",
+        $pid
+    ) );
+
+    return (int) ($qty ?? 0);
+}
+
+function wc_suf_set_production_stock_qty( $product, $new_qty ) {
+    global $wpdb;
+    $table = $wpdb->prefix.'stock_production_inventory';
+    $pid   = absint( $product->get_id() );
+    if ( ! $pid ) return;
+
+    $data = [
+        'product_name'     => wc_suf_full_product_label( $product ),
+        'sku'              => $product->get_sku() ?: null,
+        'product_type'     => $product->get_type(),
+        'parent_id'        => $product->is_type('variation') ? $product->get_parent_id() : null,
+        'attributes_text'  => wc_suf_get_product_attributes_text( $product ),
+        'qty'              => max( 0, (int) $new_qty ),
+        'updated_at'       => current_time('mysql'),
+    ];
+
+    $wpdb->update( $table, $data, [ 'product_id' => $pid ], [ '%s','%s','%s','%d','%s','%f','%s' ], [ '%d' ] );
+}
+
 function wc_suf_update_production_stock_qty( $product, $delta ) {
     global $wpdb;
     $table = $wpdb->prefix.'stock_production_inventory';
@@ -667,14 +720,22 @@ add_shortcode('stock_update_form', function($atts){
     if ( ! function_exists('wc_get_products') ) {
         return '<div dir="rtl" style="color:#b91c1c">WooCommerce فعال نیست.</div>';
     }
+    if( ! current_user_can('manage_woocommerce') && ! current_user_can('manage_options') ){
+        return '<div dir="rtl" style="color:#b91c1c">دسترسی کافی برای استفاده از فرم ندارید.</div>';
+    }
     $atts = shortcode_atts(['key' => ''], $atts, 'stock_update_form');
 
-   $products = wc_get_products([
-'status' => 'publish',
-'limit' => -1,
-'type' => ['simple','variation'],
-'return' => 'objects',
-]);
+    $cache_key = 'wc_suf_products_cache_v250';
+    $products = get_transient( $cache_key );
+    if ( ! is_array($products) ) {
+        $products = wc_get_products([
+            'status' => 'publish',
+            'limit' => -1,
+            'type' => ['simple','variation'],
+            'return' => 'objects',
+        ]);
+        set_transient( $cache_key, $products, MINUTE_IN_SECONDS * 5 );
+    }
 
     $make_label = function( $p ){
         if ( $p->is_type('variation') ) {
@@ -769,7 +830,7 @@ add_shortcode('stock_update_form', function($atts){
           <div style="font-weight:700; min-width:220px">نوع عملیات موجودی / لیبل</div>
           <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
             <input type="radio" name="op-type" value="in">
-            <span>ورود به انبار</span>
+            <span>ورود به انبار تولید</span>
           </label>
           <label style="display:flex; align-items:center; gap:6px; cursor:pointer">
             <input type="radio" name="op-type" value="out">
@@ -833,7 +894,7 @@ add_shortcode('stock_update_form', function($atts){
             <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; flex:1; min-width:260px">
               <label for="wc-suf-picker-q" style="min-width:80px; font-weight:700">جستجو:</label>
               <input id="wc-suf-picker-q" type="text" placeholder="مثلاً توران / توران ۶ نفره / زرشکی" style="flex:1; min-width:260px; padding:10px; border:1px solid #e5e7eb; border-radius:12px; font-size:16px">
-              <button type="button" id="wc-suf-picker-clear" style="padding:10px 12px; border:1px solid #e5e7eb; background:#fff; border-radius:12px; cursor:pointer">پاک کردن</button>
+              <button type="button" id="wc-suf-picker-clear" aria-label="پاک کردن جستجو" title="پاک کردن" style="width:44px; height:44px; display:inline-flex; align-items:center; justify-content:center; padding:0; border:1px solid #2563eb; background:#2563eb; color:#fff; border-radius:12px; cursor:pointer; font-size:18px; font-weight:800">✕</button>
             </div>
 
             <div style="width:100%; margin-top:8px">
@@ -910,7 +971,7 @@ add_shortcode('stock_update_form', function($atts){
             }
             if(opType === 'out'){
                 if(outDestination === 'main'){
-                    return `ID: ${pid} | موجودی انبار تولید: ${prod} | موجودی انبار اصلی (ووکامرس): ${(+p.wc_stock || 0)}`;
+                    return `ID: ${pid} | موجودی انبار تولید: ${prod} | موجودی انبار اصلی: ${(+p.wc_stock || 0)}`;
                 }
                 if(outDestination === 'teh'){
                     const teh = (+p.teh_stock || 0);
@@ -1418,9 +1479,12 @@ add_shortcode('stock_update_form', function($atts){
 | AJAX: ثبت نهایی (YITH POS)
 ---------------------------------------*/
 add_action('wp_ajax_save_stock_update','wc_suf_save_stock_update_handler');
-add_action('wp_ajax_nopriv_save_stock_update','wc_suf_save_stock_update_handler');
 function wc_suf_save_stock_update_handler(){
     check_ajax_referer('save_stock_update');
+
+    if( ! is_user_logged_in() || ( ! current_user_can('manage_woocommerce') && ! current_user_can('manage_options') ) ){
+        wp_send_json_error(['message'=>'دسترسی غیرمجاز.']);
+    }
 
     $raw   = isset($_POST['items']) ? wp_unslash($_POST['items']) : '[]';
     $items = json_decode($raw, true);
@@ -1454,9 +1518,16 @@ function wc_suf_save_stock_update_handler(){
 
     global $wpdb;
     $table   = $wpdb->prefix.'stock_audit';
+    $move_table = $wpdb->prefix.'stock_production_moves';
+
+    $tx_started = false;
+    if ( in_array( $op_type, ['in','out'], true ) ) {
+        $tx_started = ( false !== $wpdb->query('START TRANSACTION') );
+    }
 
     if ($op_type === 'out') {
         $insufficient = [];
+        $locked_old_qty = [];
         foreach($items as $it){
             $pid = isset($it['id'])  ? absint($it['id']) : 0;
             $req = isset($it['qty']) ? (int) $it['qty']  : 0;
@@ -1464,8 +1535,9 @@ function wc_suf_save_stock_update_handler(){
 
             $product = wc_get_product($pid);
             if( ! $product ) continue;
-            $old   = wc_suf_get_production_stock_qty( $pid );
+            $old   = $tx_started ? wc_suf_get_production_stock_qty_for_update( $product ) : wc_suf_get_production_stock_qty( $pid );
             $pname = wc_suf_full_product_label( $product );
+            $locked_old_qty[$pid] = $old;
 
             if( $req > $old ){
                 $insufficient[] = [
@@ -1478,6 +1550,9 @@ function wc_suf_save_stock_update_handler(){
         }
 
         if ( ! empty($insufficient) ) {
+            if ( $tx_started ) {
+                $wpdb->query('ROLLBACK');
+            }
             $lines = array_map(function($r){
                 return sprintf('محصول %s (ID: %d): درخواست %d، موجودی فعلی %d', $r['name'], $r['id'], $r['req'], $r['have']);
             }, $insufficient);
@@ -1513,7 +1588,9 @@ function wc_suf_save_stock_update_handler(){
         $pname   = $stock_product->get_name();
 
         if( $op_type === 'out' ){
-            list($prod_old, $prod_new) = wc_suf_update_production_stock_qty( $product, -$req );
+            $prod_old = isset($locked_old_qty[$pid]) ? (int) $locked_old_qty[$pid] : ( $tx_started ? wc_suf_get_production_stock_qty_for_update( $product ) : wc_suf_get_production_stock_qty( $pid ) );
+            $prod_new = max( 0, $prod_old - $req );
+            wc_suf_set_production_stock_qty( $product, $prod_new );
             $old_qty      = $prod_old;
             $new_qty      = $prod_new;
             $logged_added = $req;
@@ -1524,12 +1601,17 @@ function wc_suf_save_stock_update_handler(){
             } elseif ( $out_destination === 'teh' ) {
                 $store_result  = wc_suf_yith_change_store_stock( $stock_product, $req, $transfer_store_id, 'increase' );
                 if ( is_wp_error( $store_result ) ) {
+                    if ( $tx_started ) {
+                        $wpdb->query('ROLLBACK');
+                    }
                     wp_send_json_error(['message'=>'افزایش موجودی استور YITH ناموفق: '.$store_result->get_error_message()]);
                 }
             }
 
         } elseif( $op_type === 'in' ){
-            list($prod_old, $prod_new) = wc_suf_update_production_stock_qty( $product, $req );
+            $prod_old = $tx_started ? wc_suf_get_production_stock_qty_for_update( $product ) : wc_suf_get_production_stock_qty( $pid );
+            $prod_new = max( 0, $prod_old + $req );
+            wc_suf_set_production_stock_qty( $product, $prod_new );
             $old_qty      = $prod_old;
             $new_qty      = $prod_new;
             $logged_added = $req;
@@ -1561,7 +1643,11 @@ function wc_suf_save_stock_update_handler(){
 
         $ok = $wpdb->insert( $table, $data, $formats );
         if( false === $ok ){
+            if ( $tx_started ) {
+                $wpdb->query('ROLLBACK');
+            }
             error_log('[WC Stock Update] DB Insert FAILED: '.$wpdb->last_error.' | Data: '.wp_json_encode($data));
+            wp_send_json_error(['message'=>'ثبت در پایگاه‌داده ناموفق بود.']);
         } else {
             $inserted++;
         }
@@ -1590,6 +1676,12 @@ function wc_suf_save_stock_update_handler(){
                 $move_data,
                 ['%s','%s','%s','%d','%s','%s','%s','%d','%s','%f','%f','%f','%d','%s','%s','%s']
             );
+            if ( ! empty($wpdb->last_error) ) {
+                if ( $tx_started ) {
+                    $wpdb->query('ROLLBACK');
+                }
+                wp_send_json_error(['message'=>'ثبت لاگ حرکات انبار ناموفق بود.']);
+            }
         }
 
         $full_name = wc_suf_full_product_label($product);
@@ -1640,8 +1732,15 @@ function wc_suf_save_stock_update_handler(){
     }
 
     if ( $inserted === 0 ) {
+        if ( $tx_started ) {
+            $wpdb->query('ROLLBACK');
+        }
         $msg = 'هیچ موردی ثبت نشد.' . ( $wpdb->last_error ? (' DB error: '.$wpdb->last_error) : '' );
         wp_send_json_error(['message'=>$msg]);
+    }
+
+    if ( $tx_started ) {
+        $wpdb->query('COMMIT');
     }
 
     $op_label = wc_suf_op_label( $op_type === 'out' ? ( $out_destination === 'teh' ? 'out_teh' : 'out_main' ) : $op_type );
