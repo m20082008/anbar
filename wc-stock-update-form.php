@@ -588,7 +588,17 @@ function wc_suf_set_production_stock_qty( $product, $new_qty ) {
         'updated_at'       => current_time('mysql'),
     ];
 
-    $wpdb->update( $table, $data, [ 'product_id' => $pid ], [ '%s','%s','%s','%d','%s','%f','%s' ], [ '%d' ] );
+    $updated = $wpdb->update( $table, $data, [ 'product_id' => $pid ], [ '%s','%s','%s','%d','%s','%f','%s' ], [ '%d' ] );
+    if ( false === $updated ) {
+        return new WP_Error( 'production_update_failed', 'به‌روزرسانی موجودی انبار تولید در دیتابیس ناموفق بود.' );
+    }
+
+    $verify_qty = $wpdb->get_var( $wpdb->prepare("SELECT qty FROM `$table` WHERE product_id = %d", $pid ) );
+    if ( (int) $verify_qty !== max( 0, (int) $new_qty ) ) {
+        return new WP_Error( 'production_verify_failed', 'صحت‌سنجی موجودی انبار تولید ناموفق بود.' );
+    }
+
+    return true;
 }
 
 function wc_suf_update_production_stock_qty( $product, $delta ) {
@@ -1549,6 +1559,9 @@ function wc_suf_save_stock_update_handler(){
     $tx_started = false;
     if ( in_array( $op_type, ['in','out'], true ) ) {
         $tx_started = ( false !== $wpdb->query('START TRANSACTION') );
+        if ( ! $tx_started ) {
+            wp_send_json_error(['message'=>'شروع تراکنش دیتابیس ناموفق بود. عملیات برای جلوگیری از ثبت ناقص متوقف شد.']);
+        }
     }
 
     if ($op_type === 'out') {
@@ -1616,13 +1629,25 @@ function wc_suf_save_stock_update_handler(){
         if( $op_type === 'out' ){
             $prod_old = isset($locked_old_qty[$pid]) ? (int) $locked_old_qty[$pid] : ( $tx_started ? wc_suf_get_production_stock_qty_for_update( $product ) : wc_suf_get_production_stock_qty( $pid ) );
             $prod_new = max( 0, $prod_old - $req );
-            wc_suf_set_production_stock_qty( $product, $prod_new );
+            $prod_update_result = wc_suf_set_production_stock_qty( $product, $prod_new );
+            if ( is_wp_error( $prod_update_result ) ) {
+                if ( $tx_started ) {
+                    $wpdb->query('ROLLBACK');
+                }
+                wp_send_json_error(['message'=>$prod_update_result->get_error_message()]);
+            }
             $old_qty      = $prod_old;
             $new_qty      = $prod_new;
             $logged_added = $req;
 
             if ( $out_destination === 'main' ) {
-                wc_update_product_stock($stock_product, $req, 'increase');
+                $main_stock_result = wc_update_product_stock($stock_product, $req, 'increase');
+                if ( false === $main_stock_result ) {
+                    if ( $tx_started ) {
+                        $wpdb->query('ROLLBACK');
+                    }
+                    wp_send_json_error(['message'=>'افزایش موجودی انبار اصلی ووکامرس ناموفق بود.']);
+                }
                 $stock_product->save();
             } elseif ( $out_destination === 'teh' ) {
                 $store_result  = wc_suf_yith_change_store_stock( $stock_product, $req, $transfer_store_id, 'increase' );
@@ -1637,7 +1662,13 @@ function wc_suf_save_stock_update_handler(){
         } elseif( $op_type === 'in' ){
             $prod_old = $tx_started ? wc_suf_get_production_stock_qty_for_update( $product ) : wc_suf_get_production_stock_qty( $pid );
             $prod_new = max( 0, $prod_old + $req );
-            wc_suf_set_production_stock_qty( $product, $prod_new );
+            $prod_update_result = wc_suf_set_production_stock_qty( $product, $prod_new );
+            if ( is_wp_error( $prod_update_result ) ) {
+                if ( $tx_started ) {
+                    $wpdb->query('ROLLBACK');
+                }
+                wp_send_json_error(['message'=>$prod_update_result->get_error_message()]);
+            }
             $old_qty      = $prod_old;
             $new_qty      = $prod_new;
             $logged_added = $req;
