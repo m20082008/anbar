@@ -9,13 +9,6 @@
 if ( ! defined('ABSPATH') ) exit;
 
 /*--------------------------------------
-| تنظیمات: URL وب‌اپ Google Apps Script
----------------------------------------*/
-if ( ! defined('WC_SUF_GS_WEBAPP_URL') ) {
-    define('WC_SUF_GS_WEBAPP_URL', 'https://script.google.com/macros/s/AKfycbxRGELbFGPSbVPrswNOxsQzxC5Epox1OLMEEH0LL38sPXcifIrd9g2fPdxWvMXzjYve/exec'); // TODO: جایگزین کن
-}
-
-/*--------------------------------------
 | ثابت: Store تهرانپارس برای YITH POS
 ---------------------------------------*/
 if ( ! defined('WC_SUF_TEHRANPARS_STORE_ID') ) {
@@ -37,6 +30,7 @@ register_activation_hook(__FILE__, function(){
     $sql = "CREATE TABLE `$table` (
       `id` BIGINT UNSIGNED AUTO_INCREMENT,
       `batch_code`   VARCHAR(64) NULL,
+      `csv_file_url` TEXT NULL,
       `op_type`      VARCHAR(20) NULL,            -- in / out / onlyLabel / out_teh / in_teh
       `purpose`      TEXT NULL,                   -- برای out/out_teh/in_teh
       `print_label`  TINYINT(1) DEFAULT 0,        -- ارسال برای چاپ
@@ -170,7 +164,8 @@ function wc_suf_maybe_upgrade_schema(){
 
     $needed = [
         'batch_code'  => "ADD COLUMN `batch_code` VARCHAR(64) NULL AFTER `id`",
-        'op_type'     => "ADD COLUMN `op_type` VARCHAR(20) NULL AFTER `batch_code`",
+        'csv_file_url'=> "ADD COLUMN `csv_file_url` TEXT NULL AFTER `batch_code`",
+        'op_type'     => "ADD COLUMN `op_type` VARCHAR(20) NULL AFTER `csv_file_url`",
         'purpose'     => "ADD COLUMN `purpose` TEXT NULL AFTER `op_type`",
         'print_label' => "ADD COLUMN `print_label` TINYINT(1) DEFAULT 0 AFTER `purpose`",
         'product_name'=> "ADD COLUMN `product_name` TEXT NULL AFTER `product_id`",
@@ -531,6 +526,48 @@ function wc_suf_get_product_attributes_text( $product ) {
     return $txt;
 }
 
+
+function wc_suf_generate_batch_csv( $batch_code, $rows ) {
+    if ( empty( $rows ) || ! is_array( $rows ) ) {
+        return new WP_Error( 'csv_empty', 'داده‌ای برای ساخت فایل CSV وجود ندارد.' );
+    }
+
+    $upload = wp_upload_dir();
+    if ( ! empty( $upload['error'] ) ) {
+        return new WP_Error( 'csv_upload_dir', 'مسیر آپلود در دسترس نیست: ' . $upload['error'] );
+    }
+
+    $dir = trailingslashit( $upload['basedir'] ) . 'wc-suf-exports';
+    if ( ! wp_mkdir_p( $dir ) ) {
+        return new WP_Error( 'csv_mkdir_failed', 'ساخت پوشه فایل‌های CSV ناموفق بود.' );
+    }
+
+    $safe_batch = preg_replace('/[^A-Za-z0-9_\-]/', '_', (string) $batch_code );
+    $filename   = sprintf( '%s-%s.csv', $safe_batch, wp_generate_password(6, false, false) );
+    $filepath   = trailingslashit( $dir ) . $filename;
+    $fileurl    = trailingslashit( $upload['baseurl'] ) . 'wc-suf-exports/' . $filename;
+
+    $fp = fopen( $filepath, 'w' );
+    if ( false === $fp ) {
+        return new WP_Error( 'csv_open_failed', 'ایجاد فایل CSV ناموفق بود.' );
+    }
+
+    fputcsv( $fp, [ 'id', 'name', 'price' ] );
+    foreach ( $rows as $r ) {
+        fputcsv( $fp, [
+            (string) ( $r['id'] ?? '' ),
+            (string) ( $r['name'] ?? '' ),
+            (string) ( $r['price'] ?? '' ),
+        ] );
+    }
+    fclose( $fp );
+
+    return [
+        'path' => $filepath,
+        'url'  => $fileurl,
+    ];
+}
+
 function wc_suf_get_production_stock_qty( $product_id ) {
     global $wpdb;
     $table = $wpdb->prefix.'stock_production_inventory';
@@ -588,7 +625,17 @@ function wc_suf_set_production_stock_qty( $product, $new_qty ) {
         'updated_at'       => current_time('mysql'),
     ];
 
-    $wpdb->update( $table, $data, [ 'product_id' => $pid ], [ '%s','%s','%s','%d','%s','%f','%s' ], [ '%d' ] );
+    $updated = $wpdb->update( $table, $data, [ 'product_id' => $pid ], [ '%s','%s','%s','%d','%s','%f','%s' ], [ '%d' ] );
+    if ( false === $updated ) {
+        return new WP_Error( 'production_update_failed', 'به‌روزرسانی موجودی انبار تولید در دیتابیس ناموفق بود.' );
+    }
+
+    $verify_qty = $wpdb->get_var( $wpdb->prepare("SELECT qty FROM `$table` WHERE product_id = %d", $pid ) );
+    if ( (int) $verify_qty !== max( 0, (int) $new_qty ) ) {
+        return new WP_Error( 'production_verify_failed', 'صحت‌سنجی موجودی انبار تولید ناموفق بود.' );
+    }
+
+    return true;
 }
 
 function wc_suf_update_production_stock_qty( $product, $delta ) {
@@ -876,6 +923,8 @@ add_shortcode('stock_update_form', function($atts){
         <div>
           <button type="button" id="btn-save" style="margin-top:10px; display:none; padding:12px 18px; cursor:pointer; border:1px solid #2563eb; background:#2563eb; color:#fff; border-radius:10px" disabled>✅ ثبت نهایی</button>
         </div>
+
+        <div id="save-result" style="display:none; margin-top:8px; padding:10px 12px; border:1px solid #d1d5db; border-radius:10px; background:#f9fafb"></div>
     </div>
 
     <div class="wc-suf-modal-overlay" id="wc-suf-modal-overlay" aria-hidden="true"></div>
@@ -1465,6 +1514,7 @@ add_shortcode('stock_update_form', function($atts){
             }
 
             submitting = true;
+            $('#save-result').hide().empty();
 
             const $btn = $(this);
             const originalText = $btn.text();
@@ -1480,8 +1530,15 @@ add_shortcode('stock_update_form', function($atts){
             }).done(function(res){
                 try{
                     if(res && res.success){
-                        alert(res.data && res.data.message ? res.data.message : 'ثبت شد.');
-                        location.reload();
+                        const msg = (res.data && res.data.message) ? res.data.message : 'ثبت شد.';
+                        const csvUrl = (res.data && res.data.csv_url) ? String(res.data.csv_url) : '';
+                        let html = '<div style="font-weight:700; color:#065f46">'+escapeHtml(msg)+'</div>';
+                        if(csvUrl){
+                            html += '<div style="margin-top:8px"><a href="'+csvUrl+'" target="_blank" rel="noopener" style="color:#1d4ed8; font-weight:700">دانلود فایل CSV عملیات</a></div>';
+                        }
+                        $('#save-result').html(html).show();
+                        alert(msg);
+                        submitting = false; $btn.prop('disabled', false).css({opacity: 1, cursor: 'pointer'}).text(originalText);
                     }else{
                         alert((res && res.data && res.data.message) ? res.data.message : 'ثبت ناموفق.');
                         submitting = false; $btn.prop('disabled', false).css({opacity: 1, cursor: 'pointer'}).text(originalText);
@@ -1549,6 +1606,9 @@ function wc_suf_save_stock_update_handler(){
     $tx_started = false;
     if ( in_array( $op_type, ['in','out'], true ) ) {
         $tx_started = ( false !== $wpdb->query('START TRANSACTION') );
+        if ( ! $tx_started ) {
+            wp_send_json_error(['message'=>'شروع تراکنش دیتابیس ناموفق بود. عملیات برای جلوگیری از ثبت ناقص متوقف شد.']);
+        }
     }
 
     if ($op_type === 'out') {
@@ -1591,7 +1651,7 @@ function wc_suf_save_stock_update_handler(){
     $batch_code = wc_suf_next_batch_code( $op_type === 'out' ? 'out' : $op_type );
 
     $inserted = 0;
-    $rows_for_sheet = [];
+    $csv_rows = [];
 
     foreach($items as $it){
         $pid = isset($it['id'])  ? absint($it['id']) : 0;
@@ -1616,13 +1676,25 @@ function wc_suf_save_stock_update_handler(){
         if( $op_type === 'out' ){
             $prod_old = isset($locked_old_qty[$pid]) ? (int) $locked_old_qty[$pid] : ( $tx_started ? wc_suf_get_production_stock_qty_for_update( $product ) : wc_suf_get_production_stock_qty( $pid ) );
             $prod_new = max( 0, $prod_old - $req );
-            wc_suf_set_production_stock_qty( $product, $prod_new );
+            $prod_update_result = wc_suf_set_production_stock_qty( $product, $prod_new );
+            if ( is_wp_error( $prod_update_result ) ) {
+                if ( $tx_started ) {
+                    $wpdb->query('ROLLBACK');
+                }
+                wp_send_json_error(['message'=>$prod_update_result->get_error_message()]);
+            }
             $old_qty      = $prod_old;
             $new_qty      = $prod_new;
             $logged_added = $req;
 
             if ( $out_destination === 'main' ) {
-                wc_update_product_stock($stock_product, $req, 'increase');
+                $main_stock_result = wc_update_product_stock($stock_product, $req, 'increase');
+                if ( false === $main_stock_result ) {
+                    if ( $tx_started ) {
+                        $wpdb->query('ROLLBACK');
+                    }
+                    wp_send_json_error(['message'=>'افزایش موجودی انبار اصلی ووکامرس ناموفق بود.']);
+                }
                 $stock_product->save();
             } elseif ( $out_destination === 'teh' ) {
                 $store_result  = wc_suf_yith_change_store_stock( $stock_product, $req, $transfer_store_id, 'increase' );
@@ -1637,7 +1709,13 @@ function wc_suf_save_stock_update_handler(){
         } elseif( $op_type === 'in' ){
             $prod_old = $tx_started ? wc_suf_get_production_stock_qty_for_update( $product ) : wc_suf_get_production_stock_qty( $pid );
             $prod_new = max( 0, $prod_old + $req );
-            wc_suf_set_production_stock_qty( $product, $prod_new );
+            $prod_update_result = wc_suf_set_production_stock_qty( $product, $prod_new );
+            if ( is_wp_error( $prod_update_result ) ) {
+                if ( $tx_started ) {
+                    $wpdb->query('ROLLBACK');
+                }
+                wp_send_json_error(['message'=>$prod_update_result->get_error_message()]);
+            }
             $old_qty      = $prod_old;
             $new_qty      = $prod_new;
             $logged_added = $req;
@@ -1712,50 +1790,42 @@ function wc_suf_save_stock_update_handler(){
 
         $full_name = wc_suf_full_product_label($product);
         $price = wc_get_price_to_display( $product );
-        for ($i=0; $i<$req; $i++){
-            $rows_for_sheet[] = [
-                'batch_code' => (string) $batch_code,
-                'op'         => (string) (
-                    $op_type === 'out' ? ( $out_destination === 'teh' ? 'out_teh' : 'out_main' ) : $op_type
-                ),
-                'print_label'=> (int)    ( $op_type === 'onlyLabel' ? 1 : 0 ),
-                'id'         => (string) $pid,
-                'name'       => (string) $full_name,
-                'price'      => (float)  $price,
-                'purpose'    => (string) (
-                    $op_type === 'out' ? ( $out_destination === 'teh' ? 'انتقال به انبار تهرانپارس' : 'خروج به انبار اصلی' ) : ''
-                ),
-            ];
+        $csv_rows[] = [
+            'id'    => (string) $pid,
+            'name'  => (string) $full_name,
+            'price' => (string) $price,
+        ];
+    }
+
+    $csv_file_url = '';
+    if ( ! empty($csv_rows) ) {
+        $csv_result = wc_suf_generate_batch_csv( $batch_code, $csv_rows );
+        if ( is_wp_error( $csv_result ) ) {
+            if ( $tx_started ) {
+                $wpdb->query('ROLLBACK');
+            }
+            wp_send_json_error(['message'=>'ساخت فایل CSV ناموفق بود: '.$csv_result->get_error_message()]);
+        }
+
+        $csv_file_url = (string) ( $csv_result['url'] ?? '' );
+        $csv_updated = $wpdb->update(
+            $table,
+            [ 'csv_file_url' => $csv_file_url ],
+            [ 'batch_code' => $batch_code ],
+            [ '%s' ],
+            [ '%s' ]
+        );
+        if ( false === $csv_updated ) {
+            if ( ! empty( $csv_result['path'] ) && file_exists( $csv_result['path'] ) ) {
+                @unlink( $csv_result['path'] );
+            }
+            if ( $tx_started ) {
+                $wpdb->query('ROLLBACK');
+            }
+            wp_send_json_error(['message'=>'ثبت لینک CSV در دیتابیس ناموفق بود.']);
         }
     }
 
-    if ( ! empty($rows_for_sheet) && defined('WC_SUF_GS_WEBAPP_URL') && WC_SUF_GS_WEBAPP_URL ) {
-        $payload = [
-            'op'   => 'append',
-            'rows' => $rows_for_sheet,
-            'meta' => [
-                'user_code'  => $user_code,
-                'user_login' => $ulog,
-                'ip'         => $ip,
-                'ts'         => current_time('mysql'),
-            ],
-            'headers'       => ['batch_code','op','print_label','ID','name','price','purpose'],
-            'baseSheetName' => 'Sheet1'
-        ];
-        $response = wp_remote_post( WC_SUF_GS_WEBAPP_URL, [
-            'timeout' => 15,
-            'headers' => ['Content-Type' => 'application/json; charset=utf-8'],
-            'body'    => wp_json_encode( $payload ),
-        ] );
-        if ( is_wp_error($response) ) {
-            error_log('[WC Stock Update] Google Sheets POST failed: '.$response->get_error_message());
-        } else {
-            $code = wp_remote_retrieve_response_code($response);
-            if ( $code < 200 || $code >= 300 ) {
-                error_log('[WC Stock Update] Google Sheets bad status: '.$code.' | body: '.wp_remote_retrieve_body($response));
-            }
-        }
-    }
 
     if ( $inserted === 0 ) {
         if ( $tx_started ) {
@@ -1770,7 +1840,11 @@ function wc_suf_save_stock_update_handler(){
     }
 
     $op_label = wc_suf_op_label( $op_type === 'out' ? ( $out_destination === 'teh' ? 'out_teh' : 'out_main' ) : $op_type );
-    wp_send_json_success(['message'=>"ثبت {$op_label} انجام شد. کد ثبت: {$batch_code}"]);
+    wp_send_json_success([
+        'message'=>"ثبت {$op_label} انجام شد. کد ثبت: {$batch_code}",
+        'batch_code' => $batch_code,
+        'csv_url' => $csv_file_url,
+    ]);
 }
 
 /*--------------------------------------
@@ -1917,6 +1991,156 @@ function wc_suf_render_audit_html($args = []){
     return ob_get_clean();
 }
 
+
+
+function wc_suf_gregorian_to_jalali( $gy, $gm, $gd ) {
+    $g_d_m = [0,31,59,90,120,151,181,212,243,273,304,334];
+    $gy2 = ($gm > 2) ? ($gy + 1) : $gy;
+    $days = 355666 + (365 * $gy) + intdiv($gy2 + 3, 4) - intdiv($gy2 + 99, 100) + intdiv($gy2 + 399, 400) + $gd + $g_d_m[$gm - 1];
+    $jy = -1595 + (33 * intdiv($days, 12053));
+    $days %= 12053;
+    $jy += 4 * intdiv($days, 1461);
+    $days %= 1461;
+    if ($days > 365) {
+        $jy += intdiv($days - 1, 365);
+        $days = ($days - 1) % 365;
+    }
+    if ($days < 186) {
+        $jm = 1 + intdiv($days, 31);
+        $jd = 1 + ($days % 31);
+    } else {
+        $jm = 7 + intdiv($days - 186, 30);
+        $jd = 1 + (($days - 186) % 30);
+    }
+    return [ $jy, $jm, $jd ];
+}
+
+function wc_suf_format_jalali_datetime( $mysql_datetime ) {
+    $ts = strtotime( (string) $mysql_datetime );
+    if ( ! $ts ) return (string) $mysql_datetime;
+
+    $gy = (int) gmdate('Y', $ts);
+    $gm = (int) gmdate('n', $ts);
+    $gd = (int) gmdate('j', $ts);
+    [$jy, $jm, $jd] = wc_suf_gregorian_to_jalali( $gy, $gm, $gd );
+
+    return sprintf('%04d/%02d/%02d %s', $jy, $jm, $jd, gmdate('H:i:s', $ts));
+}
+
+function wc_suf_render_detailed_logs_html( $args = [] ) {
+    $public = ! empty($args['public']);
+    if ( ! $public && ! current_user_can('manage_woocommerce') && ! current_user_can('manage_options') ) {
+        return '<div class="wrap" dir="rtl" style="color:#b91c1c">دسترسی کافی برای مشاهده لاگ ندارید.</div>';
+    }
+
+    global $wpdb;
+    $move_table = $wpdb->prefix.'stock_production_moves';
+    $audit_table = $wpdb->prefix.'stock_audit';
+
+    $q = isset($_GET['q']) ? sanitize_text_field( wp_unslash($_GET['q']) ) : '';
+    $from = isset($_GET['from']) ? sanitize_text_field( wp_unslash($_GET['from']) ) : '';
+    $to   = isset($_GET['to']) ? sanitize_text_field( wp_unslash($_GET['to']) ) : '';
+
+    $where = [];
+    $params = [];
+
+    if ( $q !== '' ) {
+        $where[] = '(m.product_name LIKE %s OR m.batch_code LIKE %s)';
+        $like = '%' . $wpdb->esc_like($q) . '%';
+        $params[] = $like;
+        $params[] = $like;
+    }
+
+    if ( preg_match('/^\d{4}-\d{2}-\d{2}$/', $from) ) {
+        $where[] = 'DATE(m.created_at) >= %s';
+        $params[] = $from;
+    }
+
+    if ( preg_match('/^\d{4}-\d{2}-\d{2}$/', $to) ) {
+        $where[] = 'DATE(m.created_at) <= %s';
+        $params[] = $to;
+    }
+
+    $where_sql = $where ? ('WHERE ' . implode(' AND ', $where)) : '';
+
+    $limit = 500;
+    $sql = "SELECT m.*, a.csv_file_url
+            FROM `$move_table` m
+            LEFT JOIN (
+                SELECT batch_code, MAX(csv_file_url) AS csv_file_url
+                FROM `$audit_table`
+                GROUP BY batch_code
+            ) a ON a.batch_code = m.batch_code
+            $where_sql
+            ORDER BY m.id DESC
+            LIMIT %d";
+    $params[] = $limit;
+    $rows = $wpdb->get_results( $wpdb->prepare($sql, ...$params) );
+
+    ob_start();
+    ?>
+    <div class="wrap" dir="rtl">
+        <h1>لاگ دقیق عملیات انبار</h1>
+        <form method="get" style="margin:10px 0 14px; padding:12px; border:1px solid #e5e7eb; border-radius:10px; background:#f8fafc; display:flex; gap:10px; flex-wrap:wrap; align-items:end">
+            <?php if ( ! $public ) : ?>
+                <input type="hidden" name="page" value="wc-stock-audit-detailed">
+            <?php endif; ?>
+            <div>
+                <label style="display:block; margin-bottom:4px; font-weight:700">جستجو (نام محصول/کد عملیات)</label>
+                <input type="text" name="q" value="<?php echo esc_attr($q); ?>" placeholder="مثلاً توران یا out_0123" style="min-width:260px; padding:8px; border:1px solid #cbd5e1; border-radius:8px">
+            </div>
+            <div>
+                <label style="display:block; margin-bottom:4px; font-weight:700">از تاریخ</label>
+                <input type="date" name="from" value="<?php echo esc_attr($from); ?>" style="padding:8px; border:1px solid #cbd5e1; border-radius:8px">
+            </div>
+            <div>
+                <label style="display:block; margin-bottom:4px; font-weight:700">تا تاریخ</label>
+                <input type="date" name="to" value="<?php echo esc_attr($to); ?>" style="padding:8px; border:1px solid #cbd5e1; border-radius:8px">
+            </div>
+            <button type="submit" class="button button-primary">جستجو</button>
+        </form>
+
+        <table class="widefat fixed striped">
+            <thead><tr>
+                <th>#</th><th>کد عملیات</th><th>عملیات</th><th>مقصد</th><th>ID</th><th>نام محصول</th><th>SKU</th><th>نوع</th><th>قبل</th><th>تغییر</th><th>بعد</th><th>کاربر</th><th>کد کاربر</th><th>تاریخ (شمسی)</th><th>CSV</th>
+            </tr></thead>
+            <tbody>
+            <?php if ( ! empty($rows) ) : foreach($rows as $r):
+                $user_disp = $r->user_login ? $r->user_login : ( $r->user_id ? 'user#'.$r->user_id : 'مهمان' );
+                $csv_link = ! empty($r->csv_file_url) ? '<a href="'.esc_url($r->csv_file_url).'" target="_blank" rel="noopener">دانلود</a>' : '—';
+            ?>
+                <tr>
+                    <td><?php echo esc_html($r->id); ?></td>
+                    <td><?php echo esc_html($r->batch_code); ?></td>
+                    <td><?php echo esc_html( wc_suf_op_label($r->operation) ); ?></td>
+                    <td><?php echo esc_html($r->destination ?: '—'); ?></td>
+                    <td><?php echo esc_html($r->product_id); ?></td>
+                    <td><?php echo esc_html($r->product_name ?: ''); ?></td>
+                    <td><?php echo esc_html($r->sku ?: '—'); ?></td>
+                    <td><?php echo esc_html($r->product_type ?: '—'); ?></td>
+                    <td><?php echo esc_html((float)$r->old_qty); ?></td>
+                    <td><?php echo esc_html((float)$r->change_qty); ?></td>
+                    <td><?php echo esc_html((float)$r->new_qty); ?></td>
+                    <td><?php echo esc_html($user_disp); ?></td>
+                    <td><?php echo esc_html($r->user_code ?: '—'); ?></td>
+                    <td><?php echo esc_html( wc_suf_format_jalali_datetime($r->created_at) ); ?></td>
+                    <td><?php echo $csv_link; ?></td>
+                </tr>
+            <?php endforeach; else: ?>
+                <tr><td colspan="15" style="text-align:center">رکوردی یافت نشد.</td></tr>
+            <?php endif; ?>
+            </tbody>
+        </table>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+
+
+function wc_suf_render_detailed_logs_page(){
+    echo wc_suf_render_detailed_logs_html(['public' => false]);
+}
+
 /*--------------------------------------
 | Admin: گزارش گروهی
 ---------------------------------------*/
@@ -1931,6 +2155,15 @@ add_action('admin_menu', function(){
         'dashicons-clipboard',
         56
     );
+
+    add_submenu_page(
+        'wc-stock-audit',
+        'لاگ دقیق عملیات',
+        'لاگ دقیق عملیات',
+        $cap,
+        'wc-stock-audit-detailed',
+        'wc_suf_render_detailed_logs_page'
+    );
 });
 function wc_suf_render_audit_page(){
     if( ! current_user_can('manage_woocommerce') && ! current_user_can('manage_options') ) return;
@@ -1944,4 +2177,11 @@ add_shortcode('stock_audit_report', function($atts){
     $atts = shortcode_atts(['public' => '0'], $atts, 'stock_audit_report');
     $is_public = ($atts['public'] === '1' || strtolower($atts['public']) === 'true');
     return wc_suf_render_audit_html(['public' => $is_public]);
+});
+
+
+add_shortcode('stock_detailed_logs', function($atts){
+    $atts = shortcode_atts(['public' => '0'], $atts, 'stock_detailed_logs');
+    $is_public = ($atts['public'] === '1' || strtolower($atts['public']) === 'true');
+    return wc_suf_render_detailed_logs_html(['public' => $is_public]);
 });
